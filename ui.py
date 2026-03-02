@@ -13,7 +13,8 @@ from database import (
     get_user_chats,
     get_chat_messages,
     save_message,
-    update_chat_title
+    update_chat_title,
+    hide_chat
 )
 
 # ---------------- PAGE CONFIG ----------------
@@ -41,13 +42,11 @@ system_prompt = load_system_prompt()
 # ---------------- AUTO COMPANY DETECTION ----------------
 def detect_company(email):
     email = email.lower().strip()
-
     if email.endswith("@synise.com"):
         return "Synise"
     elif email.endswith("@publiccounsel.org"):
         return "Public Counsel"
-    else:
-        return None
+    return None
 
 # ---------------- LOAD MODELS ----------------
 @st.cache_resource
@@ -61,13 +60,11 @@ embed_model, groq_client = load_models()
 # ---------------- DYNAMIC INDEX LOADER ----------------
 def get_company_index(company):
     pc = Pinecone(api_key=pinecone_key)
-
     if company == "Synise":
         return pc.Index("syniseindex")
     elif company == "Public Counsel":
         return pc.Index("publiccounselindex")
-    else:
-        return None
+    return None
 
 # ---------------- SESSION INIT ----------------
 for key, default in {
@@ -92,7 +89,7 @@ if not st.session_state.logged_in:
 
         tab1, tab2 = st.tabs(["Login", "Signup"])
 
-        # ---------------- LOGIN ----------------
+        # LOGIN
         with tab1:
             email_l = st.text_input("Work Email", key="login_email")
             password_l = st.text_input("Password", type="password", key="login_password")
@@ -112,23 +109,13 @@ if not st.session_state.logged_in:
                         st.session_state.user_email = email_l
                         st.session_state.user_name = user[0]
                         st.session_state.company = user[1]
-
-                        chats = get_user_chats(email_l)
-                        if chats:
-                            st.session_state.current_chat = chats[0][0]
-                            st.session_state.messages = get_chat_messages(chats[0][0])
-                        else:
-                            st.session_state.current_chat = create_new_chat(
-                                email_l,
-                                user[1]
-                            )
-                            st.session_state.messages = []
-
+                        st.session_state.current_chat = None
+                        st.session_state.messages = []
                         st.rerun()
                 else:
                     st.error("Invalid credentials")
 
-        # ---------------- SIGNUP ----------------
+        # SIGNUP
         with tab2:
             name_s = st.text_input("Full Name", key="signup_name")
             email_s = st.text_input("Work Email", key="signup_email")
@@ -145,10 +132,7 @@ if not st.session_state.logged_in:
                     st.session_state.user_email = email_s
                     st.session_state.user_name = name_s
                     st.session_state.company = detected_company
-                    st.session_state.current_chat = create_new_chat(
-                        email_s,
-                        detected_company
-                    )
+                    st.session_state.current_chat = None
                     st.session_state.messages = []
                     st.rerun()
                 else:
@@ -170,22 +154,31 @@ st.sidebar.selectbox(
     key="model"
 )
 
+# -------- NEW CHAT --------
 if st.sidebar.button("➕ New Chat"):
-    chat_id = create_new_chat(
-        st.session_state.user_email,
-        st.session_state.company
-    )
-    st.session_state.current_chat = chat_id
+    st.session_state.current_chat = None
     st.session_state.messages = []
     st.rerun()
 
+# -------- CHAT HISTORY --------
 st.sidebar.markdown("### 💬 Chats")
 
 chats = get_user_chats(st.session_state.user_email)
+
 for chat_id, title in chats[:15]:
-    if st.sidebar.button(title, key=f"chat_{chat_id}"):
+
+    col1, col2 = st.sidebar.columns([0.8, 0.2])
+
+    if col1.button(title, key=f"chat_{chat_id}"):
         st.session_state.current_chat = chat_id
         st.session_state.messages = get_chat_messages(chat_id)
+        st.rerun()
+
+    if col2.button("❌", key=f"hide_{chat_id}"):
+        hide_chat(chat_id)
+        if st.session_state.current_chat == chat_id:
+            st.session_state.current_chat = None
+            st.session_state.messages = []
         st.rerun()
 
 if st.sidebar.button("Logout"):
@@ -199,26 +192,28 @@ st.title(f"Welcome {st.session_state.user_name} 👋")
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        if msg["role"] == "assistant":
-            if msg.get("response_time"):
-                st.caption(f"⏱ {msg['response_time']} sec")
-            else:
-                st.caption(f"Model: {msg.get('model')}")
+        if msg["role"] == "assistant" and msg.get("response_time"):
+            st.caption(f"⏱ {msg['response_time']} sec")
 
 # ---------------- CHAT INPUT ----------------
 query = st.chat_input("Ask your question...")
 
 if query:
 
-    if len(get_chat_messages(st.session_state.current_chat)) == 0:
-        update_chat_title(st.session_state.current_chat, query[:50])
+    if st.session_state.current_chat is None:
+        st.session_state.current_chat = create_new_chat(
+            st.session_state.user_email,
+            st.session_state.company
+        )
 
-    # Show user instantly
+    # Show instantly
     st.session_state.messages.append({
         "role": "user",
-        "content": query,
-        "model": "user"
+        "content": query
     })
+
+    with st.chat_message("user"):
+        st.write(query)
 
     save_message(
         st.session_state.current_chat,
@@ -230,56 +225,52 @@ if query:
         None
     )
 
-    with st.chat_message("user"):
-        st.write(query)
+    if len(st.session_state.messages) == 1:
+        update_chat_title(st.session_state.current_chat, query[:50])
 
-    # Assistant Response
+    # -------- ASSISTANT --------
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing company documents..."):
 
-            start_time = time.time()
+        message_placeholder = st.empty()
+        full_response = ""
+        start_time = time.time()
 
-            query_vector = embed_model.encode(query).tolist()
-            index = get_company_index(st.session_state.company)
+        query_vector = embed_model.encode(query).tolist()
+        index = get_company_index(st.session_state.company)
 
-            if not index:
-                answer = "Company index not found."
-                total_time = None
-                st.error(answer)
-            else:
-                results = index.query(
-                    vector=query_vector,
-                    top_k=6,
-                    include_metadata=True
-                )
+        results = index.query(
+            vector=query_vector,
+            top_k=6,
+            include_metadata=True
+        )
 
-                context_text = "\n\n".join(
-                    [match["metadata"]["text"] for match in results["matches"]]
-                )
+        context_text = "\n\n".join(
+            [match["metadata"]["text"] for match in results["matches"]]
+        )
 
-                response = groq_client.chat.completions.create(
-                    model=st.session_state.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion:\n{query}"}
-                    ],
-                    temperature=0.2
-                )
+        response = groq_client.chat.completions.create(
+            model=st.session_state.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion:\n{query}"}
+            ],
+            temperature=0.2
+        )
 
-                answer = response.choices[0].message.content.strip()
+        answer = response.choices[0].message.content.strip()
 
-                end_time = time.time()
-                total_time = round(end_time - start_time, 2)
+        # Typing animation
+        for char in answer:
+            full_response += char
+            message_placeholder.markdown(full_response)
+            time.sleep(0.002)
 
-                st.write(answer)
-                st.caption(f"Model Used: {st.session_state.model}")
-                st.caption(f"⏱ Response Time: {total_time} sec")
+        total_time = round(time.time() - start_time, 2)
+        st.caption(f"⏱ Response Time: {total_time} sec")
 
-    # Save assistant message
     st.session_state.messages.append({
         "role": "assistant",
         "content": answer,
-        "model": st.session_state.model,
         "response_time": total_time
     })
 

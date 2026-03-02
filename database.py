@@ -4,16 +4,7 @@ import uuid
 DB_NAME = "users.db"
 
 # -------------------------
-# SAFE COLUMN ADD FUNCTION
-# -------------------------
-def add_column_if_not_exists(cursor, table, column, column_type):
-    cursor.execute(f"PRAGMA table_info({table})")
-    columns = [col[1] for col in cursor.fetchall()]
-    if column not in columns:
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-
-# -------------------------
-# CREATE / UPDATE TABLES
+# CREATE TABLES
 # -------------------------
 def create_tables():
     conn = sqlite3.connect(DB_NAME)
@@ -24,16 +15,19 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS users (
         name TEXT,
         email TEXT PRIMARY KEY,
-        password TEXT
+        password TEXT,
+        company TEXT
     )
     """)
 
-    # CHATS
+    # CHATS (Added is_hidden column)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS chats (
         chat_id TEXT PRIMARY KEY,
         email TEXT,
-        title TEXT
+        company TEXT,
+        title TEXT,
+        is_hidden INTEGER DEFAULT 0
     )
     """)
 
@@ -41,21 +35,18 @@ def create_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         chat_id TEXT,
+        email TEXT,
+        company TEXT,
         role TEXT,
         content TEXT,
-        model TEXT
+        model TEXT,
+        response_time REAL
     )
     """)
 
-    # Safe Migration Columns
-    add_column_if_not_exists(cursor, "users", "company", "TEXT")
-    add_column_if_not_exists(cursor, "chats", "company", "TEXT")
-    add_column_if_not_exists(cursor, "messages", "email", "TEXT")
-    add_column_if_not_exists(cursor, "messages", "company", "TEXT")
-    add_column_if_not_exists(cursor, "messages", "response_time", "REAL")
-
     conn.commit()
     conn.close()
+
 
 # -------------------------
 # SIGNUP
@@ -78,6 +69,7 @@ def signup_user(name, email, password, company):
     conn.close()
     return True
 
+
 # -------------------------
 # LOGIN
 # -------------------------
@@ -94,6 +86,7 @@ def login_user(email, password):
     conn.close()
     return user
 
+
 # -------------------------
 # CREATE NEW CHAT
 # -------------------------
@@ -104,7 +97,7 @@ def create_new_chat(email, company):
     chat_id = str(uuid.uuid4())
 
     cursor.execute(
-        "INSERT INTO chats (chat_id, email, company, title) VALUES (?, ?, ?, ?)",
+        "INSERT INTO chats (chat_id, email, company, title, is_hidden) VALUES (?, ?, ?, ?, 0)",
         (chat_id, email, company, "New Chat")
     )
 
@@ -112,49 +105,73 @@ def create_new_chat(email, company):
     conn.close()
     return chat_id
 
+
 # -------------------------
 # UPDATE CHAT TITLE
 # -------------------------
 def update_chat_title(chat_id, title):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
     cursor.execute(
         "UPDATE chats SET title=? WHERE chat_id=?",
         (title, chat_id)
     )
+
     conn.commit()
     conn.close()
 
+
 # -------------------------
-# GET USER CHATS
+# HIDE CHAT (SOFT DELETE)
+# -------------------------
+def hide_chat(chat_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "UPDATE chats SET is_hidden=1 WHERE chat_id=?",
+        (chat_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# -------------------------
+# GET USER CHATS (ONLY VISIBLE)
 # -------------------------
 def get_user_chats(email):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT chat_id, title FROM chats WHERE email=? ORDER BY rowid DESC",
-        (email,)
-    )
+
+    cursor.execute("""
+        SELECT chat_id, title 
+        FROM chats 
+        WHERE email=? AND is_hidden=0
+        ORDER BY rowid DESC
+    """, (email,))
+
     data = cursor.fetchall()
     conn.close()
     return data
 
+
 # -------------------------
 # SAVE MESSAGE
 # -------------------------
-def save_message(chat_id, email, company, role, content, model, response_time=None):
+def save_message(chat_id, email, company, role, content, model, response_time):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
     cursor.execute(
-        """INSERT INTO messages
-           (chat_id, email, company, role, content, model, response_time)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
         (chat_id, email, company, role, content, model, response_time)
     )
 
     conn.commit()
     conn.close()
+
 
 # -------------------------
 # LOAD CHAT MESSAGES
@@ -168,7 +185,7 @@ def get_chat_messages(chat_id):
         (chat_id,)
     )
 
-    rows = cursor.fetchall()
+    data = cursor.fetchall()
     conn.close()
 
     return [
@@ -178,7 +195,8 @@ def get_chat_messages(chat_id):
             "model": m,
             "response_time": t
         }
-        for r, c, m, t in rows
+        for r, c, m, t in data
     ]
+
 
 create_tables()

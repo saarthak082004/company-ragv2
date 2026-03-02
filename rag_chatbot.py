@@ -38,7 +38,7 @@ groq_client = Groq(api_key=groq_key)
 with open("prompts/system_prompt.txt", "r", encoding="utf-8") as f:
     system_prompt = f.read()
 
-print("\n✅ Company Knowledge Assistant Ready")
+print("\n Company Knowledge Assistant Ready")
 print("Type 'exit' to stop.\n")
 
 # ==========================================
@@ -113,7 +113,7 @@ Question:
         answer = response.choices[0].message.content.strip()
 
         print("\n=======================================")
-        print(f"📂 ANSWER FROM: {source}")
+        print(f" ANSWER FROM: {source}")
         print("=======================================\n")
         print(answer)
         print("\n=======================================\n")
